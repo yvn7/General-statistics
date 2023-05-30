@@ -1,0 +1,197 @@
+---
+title: "Hierarchical Models or Mixed Models"
+author: "Amanda Franklin"
+date: "04/04/2022"
+output: html_document
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding = encoding, output_dir = "../docs") })
+---
+
+## Introduction
+
+This code conducts a generalised linear mixed model, or a hierarchical model
+following recommendations in Zuur et al. 2009, Mixed Effects Models and 
+Extensions in Ecology with R. 
+
+Zuur recommends the following "cookbook" approach
+1. Start with a model with all random and all fixed effects
+2. Use LRT/AIC/BIC to decide which random effects to keep
+3. Re-run winning model with REML = F (i.e. use ML rather than REML)
+4. Use marginal hypothesis tests to evaluate fixed effects
+
+If you want to know why all these steps, read Chapter 5 in Zuur
+
+## Libraries 
+
+```{r message = F, error = F}
+library(lme4) # lmer()
+library(tidyverse) # data processing functions and piping
+library(bbmle) # ICtabs()
+library(car) # Anova()
+
+```
+
+## 1. Dataset information
+
+Grasshopper example
+
+This dataset has:
+- 9 roadside populations and 9 non-roadside populations
+- 5-10 grasshoppers per population
+- 3 replicate recordings per grasshopper
+- quiet or loud rearing environments
+
+LocMax is the maximum calling frequency (Hz)
+
+```{r import data}
+dat_gh <- read.csv("../data/GLMM.csv")
+head(dat_gh)
+
+```
+
+## 2. Look at Variation 
+
+This section explains the hierarchical nature of the dataset and demonstrates
+the sources of variation in the dataset. You may skip this section if you
+understand this.
+
+First let's keep it simple and look at controls (quiet, non-roadside)
+Where is the variation? We have:
+1. Variation among populations
+2. Variation among individuals
+3. Variation among songs within individuals
+
+We can look at the variation at each level
+Select controls only
+
+```{r}
+dat_gh1 <- dat_gh %>%
+  filter(Origin == "non-roadside", 
+         Treatment == "quiet")
+```
+
+#### Observed variance within individuals
+```{r}
+varSvec <-  tapply(dat_gh1$LocMax, dat_gh1$Individual, var, na.rm = T) # vector of variances among songs within individuals
+varS <-  mean(varSvec, na.rm = T)
+varS
+```
+
+
+#### Observed variance among individual average values
+```{r}
+meanInd <- tapply(dat_gh1$LocMax, dat_gh1$Individual, mean, na.rm = T) # means for each individual
+pops <- substr(names(meanInd), start = 1, stop = 2) # identifier for individuals by population
+varIvec <- tapply(meanInd, pops, var, na.rm = T) # vector of variances among individual means
+varI <- mean(varIvec, na.rm = T)
+varI
+```
+
+#### Observed variance among population average values
+```{r}
+meanPop <-  tapply(meanInd, pops, mean, na.rm = T) # means for each individual
+varP <-  var(meanPop)
+varP
+```
+
+## 3. Run GLMM 
+
+Let's run a GLMM following the Zuur guidelines
+
+Does inclusion of random effects change our conclusions about effects of noise 
+on songs?
+
+#### Model with no random effects
+```{r}
+m1a <-  glm(LocMax ~ Origin*Treatment, data = dat_gh)
+Anova(m1a)
+```
+
+#### Full model (i.e. Zuur step 1)
+```{r}
+m1b <- lmer(LocMax ~ Origin*Treatment + (1|Individual) + (1|Site), 
+            data = dat_gh)
+Anova(m1b)
+```
+
+Note: the p-values are quite different, the random effects can have a 
+substantial influence on the p-values (usually increasing)
+
+#### Look at the output:
+```{r}
+summary(m1b)
+
+```
+Random effect section shows the variation among individuals, sites and among 
+songs within individuals (residual)
+
+
+#### What random effects should we include? (Zuur Step 2)
+We can use likelihood ratio tests, AIC or BIC to decide. 
+Here we use AIC.
+
+```{r}
+m2a <- glm(LocMax ~ Origin*Treatment, data = dat_gh)
+m2b <- lmer(LocMax ~ Origin*Treatment + (1|Individual) + (1|Site), 
+            data = dat_gh)
+m2c <- lmer(LocMax ~ Origin*Treatment + (1|Individual), data = dat_gh)
+m2d <- lmer(LocMax ~ Origin*Treatment + (1|Site), data = dat_gh)
+
+ICtab(m2a, m2b, m2c, m2d)
+```
+
+This indicates c and b are best. Since c and b are similar, and d is worse, 
+site doesn't really improve the fit. Only Individual needs to be included as
+a random effect
+
+#### Run best model but using ML (i.e. REML = F, Zuur Step 3)
+```{r}
+m2c.1 <- lmer(LocMax ~ Origin*Treatment + (1|Individual), 
+              data = dat_gh, REML = F)
+```
+
+
+#### Use marginal hypothesis tests to evaluate fixed effects (Zuur step 4)
+```{r}
+Anova(m2c.1)
+Anova(m2c)
+```
+
+Results are similar for ML and REML
+Strong evidence for effect of Origin, less for effect of Treatment
+
+
+## 4. Plot 
+
+#### Create model to get MLEs for plotting
+
+```{r}
+m2c.2 <- lmer(LocMax ~ -1 + Origin:Treatment + (1|Individual), 
+              data = dat_gh, REML = F)
+summary(m2c.2)
+LocMax <- fixef(m2c.2)
+group.CIs <- confint(m2c.2)[3:6,]
+colnames(group.CIs) <- c("lower", "upper")
+Origin <- c("Non-road", "Road", "Non-road", "Road")
+`Rearing Condition` <- c("Noisy", "Noisy", "Quiet", "Quiet")
+dat_plot <- data.frame(Origin, `Rearing Condition`, LocMax, group.CIs)
+
+# If you want, you can also plot the raw data
+# We'll make some changes so the datasets match
+dat_gh2 <- dat_gh %>%
+  mutate(Origin = ifelse(Origin == "roadside", "Road", "Non-road"),
+         Treatment = ifelse(Treatment == "noisy", "Noisy", "Quiet")) %>%
+  dplyr::rename(`Rearing Condition` = Treatment)
+
+plot1 <- ggplot(dat_gh2, aes(x = Origin, y = LocMax, 
+                             group = `Rearing Condition`)) + 
+  geom_point(aes(colour = `Rearing Condition`), 
+             position = position_jitterdodge()) +
+  geom_point(data = dat_plot, aes(x = Origin, y = LocMax),
+             position = position_dodge(width = 0.9), colour = "black") + 
+  geom_errorbar(data = dat_plot, aes(ymin = lower, ymax = upper),
+                position = position_dodge(width = 0.9)) + 
+  theme_classic() + 
+  ylab("Local Max Song Freq (Hz)") + xlab("Origin of Grasshopper")
+plot1
+```
